@@ -4,6 +4,8 @@ package annotations
 import epic.trees.BinarizedTree
 import runtime.ScalaRunTime
 import epic.parser.projections.ProjectionIndexer
+import scala.collection.mutable.HashMap
+import scala.collection.mutable.HashSet
 
 /**
  *
@@ -78,6 +80,42 @@ case class FilterAnnotations[W](toKeep: Set[Annotation]=Set.empty) extends TreeA
 }
 
 /**
+ * @param toKeep the annotations we want to keep
+ * @tparam W
+ */
+case class FilterAnnotations2[W](toKeep: Set[Annotation]=Set.empty) extends TreeAnnotator[AnnotatedLabel, W, AnnotatedLabel] {
+  def apply(tree: BinarizedTree[AnnotatedLabel], words: Seq[W]) = {
+    val wee = toKeep + FunctionalTag("UNF")
+    val wo = tree.map(l => l.copy(features = l.features.filter(wee)))
+    wo
+  }
+}
+
+/**
+ * Add child annotations to EDITED nodes
+ * @tparam W
+ */
+case class ChildAnnotateEdited[W]() extends TreeAnnotator[AnnotatedLabel, W, AnnotatedLabel] {
+  def apply(tree: BinarizedTree[AnnotatedLabel], words: Seq[W]) = {
+    val newLabelMap = HashMap[AnnotatedLabel, AnnotatedLabel]()
+    for (t <- tree.allChildren) {
+      val children = t.children
+      if (!children.isEmpty) {  
+    	val firstChild = children(0)
+        if (t.label.baseLabel == "EDITED") {
+          newLabelMap.put(t.label, t.label.annotate(FunctionalTag(firstChild.label.baseLabel)))
+        } else {
+          newLabelMap.put(t.label, t.label);
+        }
+      } else {
+        newLabelMap.put(t.label, t.label);
+      }
+    }
+    tree.map(l => newLabelMap.get(l).get)
+  }
+}
+
+/**
  * Removes all features from the [[epic.trees.AnnotatedLabel]]
  * @tparam W
  */
@@ -107,6 +145,41 @@ case class Markovize[W](horizontal: Int=0, vertical: Int=2) extends TreeAnnotato
   }
 }
 
+case class EditAnnotate[W]() extends TreeAnnotator[AnnotatedLabel, W, AnnotatedLabel] {
+  def apply(tree: BinarizedTree[AnnotatedLabel], words: Seq[W]) = {
+    def rec(t:BinarizedTree[AnnotatedLabel], editedChild:Boolean, rightEditedChild:Boolean):BinarizedTree[AnnotatedLabel] = {
+      if (t.isLeaf) {
+        if (editedChild) {
+          t.relabelRoot(_.annotate(FunctionalTag("EDITED")))
+        } else {
+          t
+        }
+      } else {
+        val newLabel = if (editedChild) {
+          val tmp = t.label.annotate(FunctionalTag("EDITED"))
+          if (rightEditedChild) {
+            tmp.annotate(FunctionalTag("UNF"))
+          } else {
+            tmp
+          }
+        } else { 
+          t.label
+        }
+        val isRightEditedChild = (t.label.baseLabel == "EDITED") || rightEditedChild 
+        val isEdited = (t.label.baseLabel == "EDITED") || editedChild 
+        t match {
+          case BinaryTree(label, t1, t2, span) =>
+            BinaryTree(newLabel, rec(t1, isEdited, false), rec(t2, isEdited, isRightEditedChild), span)
+          case UnaryTree(label,child, chain, span) =>
+            UnaryTree(newLabel, rec(child, isEdited, isRightEditedChild), chain, span)
+          case NullaryTree(label, span) =>
+            NullaryTree(newLabel, span)
+        }
+      }
+    }
+    rec(tree, false, false)
+  }
+}
 
 case class ParentAnnotate[W](order: Int = 0,  skipPunctTags: Boolean = true) extends TreeAnnotator[AnnotatedLabel, W, AnnotatedLabel] {
   def apply(tree: BinarizedTree[AnnotatedLabel], words: Seq[W]) = {

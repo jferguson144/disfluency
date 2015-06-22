@@ -19,6 +19,10 @@ import breeze.util.{Encoder, Index}
 import breeze.linalg._
 import java.io.File
 import epic.util.{SafeLogging, WeightsCache, CacheBroker}
+import epic.trees.TreeInstance
+import epic.trees.AnnotatedLabel
+import scala.collection.mutable.HashMap
+import scala.collection.mutable.HashSet
 
 
 /**
@@ -57,7 +61,10 @@ trait Model[Datum] extends SafeLogging { self =>
     accumulateCounts(s, d, gm, accum, -scale)
   }
 
-
+  var training:Boolean = false
+  var trainingData: HashMap[IndexedSeq[String], HashSet[Int]] = null
+  var precisionPenalty = 0.0
+  var recallPenalty = 0.0
   /**
    * Models have features, and this defines the mapping from indices in the weight vector to features.
    * @return
@@ -80,10 +87,11 @@ trait Model[Datum] extends SafeLogging { self =>
    */
   def readCachedFeatureWeights(suffix:String=""):Option[DenseVector[Double]] = {
     val file = new File(weightsCacheName+suffix+".txt.gz")
-    logger.info(s"Reading old weights from $file")
+    logger.info(s"Trying to read old weights from $file")
     if(file.exists)  {
       Some(WeightsCache.read(file, featureIndex))
     } else {
+      logger.info(s"File: $file not found")
       None
     }
   }

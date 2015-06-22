@@ -45,7 +45,12 @@ case class StandardTreeProcessor(headFinder: HeadFinder[AnnotatedLabel] = HeadFi
 
 
   def apply(tree: Tree[String]):BinarizedTree[AnnotatedLabel] = {
-    var transformed = xox(ens(tree).get)
+    var transformed:Tree[String] = null
+    try {val v = ens(tree)
+    if (v.isEmpty)
+      return null 
+    transformed = xox(v.get)
+    } catch {case e: Exception=>return null}
     transformed = if(transformed.children.length != 1) {
       Tree("", IndexedSeq(transformed), transformed.span)
     } else {

@@ -26,6 +26,8 @@ class SemiCRFModel[L, W](val featurizer: SemiCRFModel.BIEOFeaturizer[L, W],
                          cacheFeatures: Boolean = false) extends StandardExpectedCounts.Model[Segmentation[L, W]] with Serializable {
   def labelIndex: Index[L] = featurizer.labelIndex
 
+//  var training = false
+  
   def featureIndex = featurizer.featureIndex
 
   def extractCRF(weights: DenseVector[Double]) = {
@@ -38,13 +40,18 @@ class SemiCRFModel[L, W](val featurizer: SemiCRFModel.BIEOFeaturizer[L, W],
 
   def initialValueForFeature(f: Feature): Double = initialWeights(f)
 
-  def inferenceFromWeights(weights: DenseVector[Double]): Inference =
-    new SemiCRFInference(weights, featureIndex, featurizer, constraintsFactory)
+  def inferenceFromWeights(weights: DenseVector[Double]): Inference = {
+    val tmp = new SemiCRFInference(weights, featureIndex, featurizer, constraintsFactory)
+    tmp.training = training
+    tmp
+  }
 
 
   def accumulateCounts(s: Scorer, d: Segmentation[L, W], marg: Marginal, counts: ExpectedCounts, scale: Double): Unit = {
     counts.loss += marg.logPartition * scale
     val localization = marg.anchoring.asInstanceOf[Inference#Anchoring].localization
+    var applyCount = 0
+    var wordCount = 0
     val visitor = new TransitionVisitor[L, W] {
 
       def visitTransition(prev: Int, cur: Int, begin: Int, end: Int, count: Double) {
@@ -55,7 +62,8 @@ class SemiCRFModel[L, W](val featurizer: SemiCRFModel.BIEOFeaturizer[L, W],
           axpy(count * scale, featuresForInterior(cur, p), counts)
           p += 1
         }
-
+        applyCount += 1
+        wordCount += end-begin
         axpy(count * scale, featuresForSpan(prev, cur, begin, end), counts)
       }
     }
@@ -112,6 +120,8 @@ class SemiCRFInference[L, W](weights: DenseVector[Double],
   type Marginal = SemiCRF.Marginal[L, W]
   type Scorer = SemiCRF.Anchoring[L, W]
 
+  var training = false
+  
   def scorer(w: IndexedSeq[W]): Anchoring = {
     new Anchoring(featurizer.anchor(w), constraintsFactory.constraints(w))
   }
@@ -120,7 +130,21 @@ class SemiCRFInference[L, W](weights: DenseVector[Double],
   def startSymbol = featurizer.startSymbol
   def outsideSymbol = featurizer.outsideSymbol
 
-  def scorer(v: Segmentation[L, W]): Scorer = scorer(v.words)
+  def scorer(v: Segmentation[L, W]): Scorer = {
+    if (training) {
+      val ret = scorer(v.words)
+      val goldLabels = Array.fill(v.length)("")
+      for (s <- v.segments) {
+        for (i <- s._2.begin until s._2.end) {
+          goldLabels(i) = s._1.toString
+        }
+      }
+      ret.setGoldLabels(goldLabels)
+      ret
+    } else {
+      scorer(v.words)
+    }
+  }
 
 
   def marginal(scorer: Scorer, v: Segmentation[L, W], aug: SemiCRF.Anchoring[L, W]): Marginal = {
@@ -143,6 +167,14 @@ class SemiCRFInference[L, W](weights: DenseVector[Double],
 
     def words: IndexedSeq[W] = localization.words
 
+    var goldLabels:Array[String] = null
+    var useSoftmaxMargin = false
+    
+    def setGoldLabels[L:Manifest](labels:Array[String]) {
+      goldLabels = labels
+      useSoftmaxMargin = true
+    }
+    
     val beginCache = Array.tabulate(labelIndex.size, labelIndex.size, length){ (p,c,w) =>
       val f = localization.featuresForBegin(p, c, w)
       if (f eq null) Double.NegativeInfinity
@@ -154,9 +186,20 @@ class SemiCRFInference[L, W](weights: DenseVector[Double],
       else weights dot f
     }
 
-
+    def lossFunction(goldLabel:String, guessLabel:L):Double = {
+      val precisionPenalty = 3//2.75//3.25
+      val recallPenalty = 8//7.75//8.5
+      if (goldLabel == "E" && guessLabel == "O") {
+        recallPenalty
+      } else if (goldLabel == "O" && guessLabel == "E") {
+        precisionPenalty
+      } else {
+        0.0
+      }
+    }
+    
     def scoreTransition(prev: Int, cur: Int, beg: Int, end: Int): Double = {
-      if (beg + 1 != end && !constraints.isAllowedLabeledSpan(beg, end, cur)) {
+      if (beg + 1 != end && !constraints.isAllowedLabeledSpan(beg, end, cur) && false) {
         Double.NegativeInfinity
       } else {
         var score = 0.0
@@ -170,7 +213,14 @@ class SemiCRFInference[L, W](weights: DenseVector[Double],
             pos += 1
           }
         }
-        score
+        if (useSoftmaxMargin) {
+          for (i <- beg until end) {
+            if (labelIndex.get(cur) != goldLabels(i)) {
+              score += lossFunction(goldLabels(i), labelIndex.get(cur))
+            }
+          }
+        }
+        score 
       }
     }
 
@@ -241,13 +291,24 @@ class SegmentationModelFactory[L](val startSymbol: L,
   import SegmentationModelFactory._
 
   def makeModel(train: IndexedSeq[Segmentation[L, String]]): SemiCRFModel[L, String] = {
-    val maxLengthMap = train.flatMap(_.segments.iterator).groupBy(_._1).mapValues(arr => arr.map(_._2.length).max)
+    var maxLengthMap = train.flatMap(_.segments.iterator).groupBy(_._1).mapValues(arr => arr.map(_._2.length).max)
+    var newMap = Map[L,Int]()
+    val maxLength = train.map(_.words.length).max
+    for (k <- maxLengthMap.keys) {
+      if (maxLengthMap(k)>0) {
+    	  newMap = newMap + (k->maxLength)  
+      } else {
+        newMap = newMap + (k->0)
+      }
+      
+    }
+//    maxLengthMap = newMap
     val labelIndex: Index[L] = Index[L](Iterator(startSymbol, outsideSymbol) ++ train.iterator.flatMap(_.label.map(_._1)))
     val maxLengthArray = Encoder.fromIndex(labelIndex).tabulateArray(maxLengthMap.getOrElse(_, 0))
     logger.info("Maximum lengths for segments: " + maxLengthMap)
 
     val counts: Counter2[L, String, Double] = Counter2.count(train.map(_.asFlatTaggedSequence(outsideSymbol)).map{seg => seg.label zip seg.words}.flatten).mapValues(_.toDouble)
-    val lexicon = new SimpleLexicon(labelIndex, counts, openTagThreshold = 10, closedWordThreshold = 20)
+    val lexicon = new SimpleLexicon(labelIndex, counts, openTagThreshold = 10, closedWordThreshold = 20000000)
 
     val allowedSpanClassifier: LabeledSpanConstraints.Factory[L, String] = pruningModel.getOrElse(new LabeledSpanConstraints.LayeredTagConstraintsFactory(lexicon, maxLengthArray))
 
@@ -258,7 +319,7 @@ class SegmentationModelFactory[L](val startSymbol: L,
     sfeat = gazetteer.foldLeft(sfeat)(_ + _)
 
     val wf = IndexedWordFeaturizer.fromData(wfeat, train.map(_.words))
-    val sf = IndexedSurfaceFeaturizer.fromData(sfeat, train.map(_.words), allowedSpanClassifier)
+    val sf = IndexedSurfaceFeaturizer.fromData(sfeat, train.map(_.words), allowedSpanClassifier, labelIndex)
 
     for(f <- pruningModel) {
       assert(f.labelIndex == labelIndex, f.labelIndex + " " + labelIndex)
@@ -346,9 +407,11 @@ object SegmentationModelFactory {
         if (!constraints.isAllowedLabeledSpan(begin, end, cur)) {
           null
         } else {
-          val features = spanFeatureIndex.crossProduct(bioeFeatures(cur)(2), loc.featuresForSpan(begin, end), spanOffset)
-          //val features2 = spanFeatureIndex.crossProduct(transitionFeatures(prev)(cur), loc.featuresForSpan(begin, end), spanOffset)
-          new FeatureVector(features)
+          val features = spanFeatureIndex.crossProduct(bioeFeatures(cur)(2), loc.featuresForLabelledSpan(begin, end, labelIndex.get(cur).toString), spanOffset)
+          val transFeatures = spanFeatureIndex.crossProduct(transitionFeatures(prev)(cur), loc.featuresForLabelledSpan(begin, end, labelIndex.get(cur).toString), spanOffset)
+          val tmp = new FeatureVector(features++transFeatures)
+
+          tmp
         }
       }
     }
@@ -384,7 +447,7 @@ object SegmentationModelFactory {
             wordBuilder.add(bioeFeatures(li)(1), wordFeats.featuresForWord(i))
           }
           // span
-          spanBuilder.add(bioeFeatures(li)(2), feats.featuresForSpan(span.begin, span.end))
+          spanBuilder.add(bioeFeatures(li)(2), feats.featuresForLabelledSpan(span.begin, span.end, labelIndex.get(li).toString))
           last = li
         }
       }

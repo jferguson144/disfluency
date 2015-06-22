@@ -64,12 +64,14 @@ object CRF {
                      hashFeatures: Double = 1.0)(implicit cache: CacheBroker = CacheBroker()):CRF[L, String] = {
     val model: CRFModel[L, String] = new TaggedSequenceModelFactory[L](startSymbol,  gazetteer = gazetteer, wordFeaturizer = wordFeaturizer, transitionFeaturizer = transitionFeaturizer, hashFeatureScale = hashFeatures).makeModel(data)
 
+    model.training = true
 
     val obj = new ModelObjective(model, data)
 
     val cached = new CachedBatchDiffFunction(obj)
     val weights = opt.minimize(cached, obj.initialWeightVector(randomize = false))
 
+    model.training = false
     model.extractCRF(weights)
   }
 

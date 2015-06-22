@@ -15,5 +15,6 @@ case class MultiSurfaceFeaturizer[W](feats: IndexedSeq[SurfaceFeaturizer[W]]) ex
     def words: IndexedSeq[W] = w
 
     def featuresForSpan(beg: Int, end: Int): Array[Feature] = anchs.flatMap(_.featuresForSpan(beg, end))
+    override def featuresForLabelledSpan(beg: Int, end: Int, label:String): Array[Feature] = anchs.flatMap(_.featuresForLabelledSpan(beg, end, label))
   }
 }
